@@ -12,7 +12,9 @@ alwaysApply: true
 - 只改该题 `problem.yaml` 里 `workspace.editable` 的路径。checker、interactor、`judge/`、`baseline/`、评分脚本只读。
 - 不打表，不按样例、文件名或种子特判，不把计时段内的工作挪到计时外，不伪造协议输出。
 - 提交源码。不把 `.o`、可执行文件、`build/` 或预计算答案放进可提交目录。
-- 登录节点只改源码、读日志。不在登录节点执行 `make -j`、MPI、NPU 测试或大样例。超过 8 核的任务交给人用 `sbatch` 提交 `kp_run`。
+- 登录节点只改源码、读日志。不在登录节点执行 `make -j`、MPI、NPU 测试、`hellohpc test` 或大样例。
+- 每次优化后的算分用 `scripts/kp-score.sh` 提交到计算节点。脚本会同时写 `-p` 和 `-q`。不超过 8 核走 `kp_interact`，超过 8 核走 `kp_run`。提交后读 `logs/score/` 里的日志。
+- Cheatsheet 凭据在 `04-cheatsheet/.env`，该文件不提交。
 - 一次只验证一个优化假设。正确性失败或变慢就回退，不在错误版本上叠补丁。
 - 性能以题目脚本或 `hellohpc test` 为准，不用选手自插计时当分数。笔记写到 `docs/notes/`，不要写进题目可提交目录。
 - 不主动 `git commit` 或推远程，除非人明确要求。Agent 不代发 OJ。
@@ -22,5 +24,5 @@ alwaysApply: true
 ```text
 可改：03-accelerate/src/solver.py、03-accelerate/env.sh
 不可改：03-accelerate/judge/、benchmark 协议、计时区间
-自测：在计算节点上先 python3 benchmark.py sample，再 public-large-b
+自测：scripts/kp-score.sh -d 03-accelerate -c 32 -t 01:00:00 -J accel-sample -- python3 benchmark.py sample
 ```

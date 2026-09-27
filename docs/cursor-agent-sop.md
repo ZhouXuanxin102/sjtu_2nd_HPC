@@ -11,7 +11,7 @@
 - 个人赛。不引入他人代码、不打表、不针对样例或种子特判、不把计时段内的计算挪到计时外、不伪造计时或协议输出。
 - 只改该题 `problem.yaml` 的 `workspace.editable`。`readonly`、checker、interactor、baseline、评分脚本一律只读。
 - 提交源码。不提交编译产物、混淆代码、预编译内核、预计算答案。
-- 登录节点禁止编译、并行计算，以及会拉高负载的语言服务。开发走 `kp_interact`（最多 8 核，最长 8h）；超过 8 核的正式自测用 `sbatch` 提交 `kp_run`（最多 128 核、1 个节点、最长 2h）。
+- 登录节点禁止编译、并行计算，以及会拉高负载的语言服务。不超过 8 核的自测走 `kp_interact`（最长 8h）；超过 8 核走 `kp_run`（最多 128 核、1 个节点、最长 2h）。校内赛队列必须同时带 `-p` 和 `-q`。
 - NPU：`contest-slice` 必须申请 12 核 CPU + 1 卡，每 4h 最多用 3h；`contest-full` 必须申请 192 核 + 8 卡，仅 LLM Stage1 满分后解锁，每 3h 最多用 2h。
 - 评测在容器内，GCC、CMake、Python 与集群默认版本不一致。优化不得依赖登录节点上的特定库版本。允许 `module load` 的题目，要把加载写进该题的 `env.sh` 或 `run.sh`。
 - 本地分只说明公开算例合法。打榜题（Mahjx、Ragged Softmax Moments）本地非 0 分不等于 OJ 分。
@@ -22,7 +22,13 @@
 - CPU 集群：`/vault/public/xflops/bin/hellohpc`
 - NPU 集群：`/nfs/bin/hellohpc`
 
-在含 `problem.yaml` 的题目目录执行 `hellohpc test` 与 `hellohpc pack`。
+在含 `problem.yaml` 的题目目录执行 `hellohpc test` 与 `hellohpc pack`。不要在登录节点直接跑测试。每次优化后的算分从仓库根目录提交，脚本会按核数选择队列并同时写上 `-p` 和 `-q`：
+
+```bash
+scripts/kp-score.sh -d 03-accelerate -c 32 -t 01:00:00 -J accel-sample -- python3 benchmark.py sample
+```
+
+日志在 `logs/score/`。MPI 题用 `-n` 指定 rank、`-c 1`。Cheatsheet 的模型凭据在 `04-cheatsheet/.env`，该文件不进提交包，也不要写入笔记。
 
 ## 1. 会话怎么开
 
@@ -58,7 +64,7 @@ Cursor 用法：
 - 只把该题 README、`problem.yaml` 和即将修改的文件加入上下文。不要把整个仓库或评测器源码塞进上下文。
 - 探索框架代码用只读搜索。子代理只负责读代码和定位热点，不改 `readonly` 路径。
 - 一次对话只推进一个假设。并行实验用 git 分支或单独工作区，避免两个 Agent 写同一文件。
-- 重负载命令由人在计算节点执行。Agent 在登录节点上只改源码、读日志，不启动 `make -j`、MPI 或 NPU 测试。
+- 算分用 `scripts/kp-score.sh` 提交到计算节点，再读 `logs/score/`。Agent 在登录节点上只改源码、读日志，不启动 `make -j`、MPI、`hellohpc test` 或 NPU 测试。
 
 ## 2. 单题迭代循环
 
@@ -102,7 +108,7 @@ Cursor 用法：
 ## 5. Agent 不得做的事
 
 - 修改 checker、interactor、`judge/`、`baseline/`、评分脚本，或在计时协议上做文章。
-- 在登录节点跑并行编译或大样例。
+- 在登录节点跑并行编译、`hellohpc test` 或大样例。算分用 `scripts/kp-score.sh`。
 - 为通过样例硬编码输入规模、文件名、种子或参考输出。
 - 把完整算子实现写进 Cheatsheet 的 `SKILL.md`，包括压缩、编码、混淆等形式。
 - 在可提交目录里新增评测器未列出的源文件。Ragged Softmax 题明确禁止新增源文件。
