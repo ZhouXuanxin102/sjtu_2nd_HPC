@@ -4,6 +4,8 @@
 typedef unsigned int uint32;
 //typedef unsigned __int32 uint32;
 
+#include <atomic>
+
 void md5_compress(uint32 ihv[], const uint32 block[]);
 
 void find_block0(uint32 block[], const uint32 IV[]);
@@ -11,7 +13,13 @@ void find_block1(uint32 block[], const uint32 IV[]);
 
 // very fast inlined xorshift random number generator with period 2^64 - 1
 // by G. Marsaglia: http://www.jstatsoft.org/v08/i14/xorshift.pdf 
-extern uint32 seed32_1, seed32_2;
+extern thread_local uint32 seed32_1, seed32_2;
+extern thread_local int g_block_ok;
+extern thread_local const std::atomic<int>* g_stop;
+inline bool search_cancelled()
+{
+	return g_stop != 0 && g_stop->load(std::memory_order_relaxed) != 0;
+}
 inline uint32 xrng64()
 {
 	uint32 t = seed32_1 ^ (seed32_1 << 10);

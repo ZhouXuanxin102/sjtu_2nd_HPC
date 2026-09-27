@@ -23,8 +23,9 @@ void find_block1_wang(uint32 block[], const uint32 IV[])
 		q9mask2[k] = ((k<<1) ^ (k<<7) ^ (k<<14) ^ (k<<15) ^ (k<<22)) & 0x6074041c;
 	
 	
-	while (true) 
+	while (true)
 	{
+		if (search_cancelled()) return;
 		uint32 aa = Q[Qoff] & 0x80000000;
 		uint32 bb = 0x80000000 ^ aa;
 
@@ -63,6 +64,7 @@ void find_block1_wang(uint32 block[], const uint32 IV[])
 		unsigned counter = 0;
 		while (counter < (1 << 12))
 		{
+			if (search_cancelled()) return;
 			++counter;
 
 			uint32 q1 = q1a | (xrng64() & 0x01c0e71f);
@@ -161,6 +163,7 @@ void find_block1_wang(uint32 block[], const uint32 IV[])
 
 				for (unsigned k9 = 0; k9 < (1<<10);)
 				{
+					if (search_cancelled()) return;
 					uint32 a = aa, b = bb, c = cc, d = dd;
 					Q[Qoff + 9] = q9 ^ q9mask2[k9]; ++k9;
 					MD5_REVERSE_STEP(8, 0x698098d8, 7);
@@ -231,8 +234,6 @@ void find_block1_wang(uint32 block[], const uint32 IV[])
 					if (0 != ((a^c) >> 31)) continue;
 					MD5_STEP(II, b, c, d, a, block[9], 0xeb86d391, 21);
 
-					std::cout << "." << std::flush;
-
 					uint32 block2[16];
 					uint32 IV1[4], IV2[4];
 					for (int t = 0; t < 4; ++t)
@@ -252,11 +253,10 @@ void find_block1_wang(uint32 block[], const uint32 IV[])
 
 					md5_compress(IV1, block);
 					md5_compress(IV2, block2);
-					if (IV2[0]==IV1[0] && IV2[1]==IV1[1] && IV2[2]==IV1[2] && IV2[3]==IV1[3])
+					if (IV2[0]==IV1[0] && IV2[1]==IV1[1] && IV2[2]==IV1[2] && IV2[3]==IV1[3]) {
+						g_block_ok = 1;
 						return;
-
-					if (IV2[0] != IV1[0])
-						std::cout << "!" << std::flush;
+					}
 				}
 			}
 		}

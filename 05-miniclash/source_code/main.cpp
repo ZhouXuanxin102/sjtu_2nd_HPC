@@ -1,6 +1,9 @@
 #include <iostream>
 #include <fstream>
 #include <time.h>
+#include <thread>
+#include <mutex>
+#include <cstdlib>
 
 #include "main.hpp"
 #include "timer.hpp"
@@ -11,7 +14,7 @@ const uint32 MD5IV[] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
 
 unsigned load_block(istream& i, uint32 block[]);
 void save_block(ostream& o, const uint32 block[]);
-void find_collision(const uint32 IV[], uint32 msg1block0[], uint32 msg1block1[], uint32 msg2block0[], uint32 msg2block1[], bool verbose = false);
+bool find_collision(const uint32 IV[], uint32 msg1block0[], uint32 msg1block1[], uint32 msg2block0[], uint32 msg2block1[], bool verbose = false);
 
 #if 0
 
@@ -264,10 +267,26 @@ void test_rndiv(bool single = false);
 void test_reciv(bool single = false);
 void test_all();
 
+int run_batch(const std::string& tasks_path, int threads);
+
 int main(int argc, char** argv)
 {
 	seed32_1 = uint32(time(NULL));
 	seed32_2 = 0x12345678;
+
+	{
+		std::string tasks;
+		int threads = 0;
+		for (int i = 1; i < argc; ++i) {
+			std::string arg = argv[i];
+			if (arg == "--tasks" && i + 1 < argc)
+				tasks = argv[++i];
+			else if (arg == "--threads" && i + 1 < argc)
+				threads = std::atoi(argv[++i]);
+		}
+		if (!tasks.empty())
+			return run_batch(tasks, threads);
+	}
 
 	uint32 IV[4] = { MD5IV[0], MD5IV[1], MD5IV[2], MD5IV[3] };
 
@@ -556,18 +575,24 @@ void save_block(ostream& o, const uint32 block[])
 			o << (unsigned char)((block[k] >> (c*8))&0xFF);
 }
 
-void find_collision(const uint32 IV[], uint32 msg1block0[], uint32 msg1block1[], uint32 msg2block0[], uint32 msg2block1[], bool verbose)
+bool find_collision(const uint32 IV[], uint32 msg1block0[], uint32 msg1block1[], uint32 msg2block0[], uint32 msg2block1[], bool verbose)
 {
+	g_block_ok = 0;
 	if (verbose)
 		cout << "Generating first block: " << flush;
 	find_block0(msg1block0, IV);
+	if (!g_block_ok || search_cancelled())
+		return false;
 
 	uint32 IHV[4] = { IV[0], IV[1], IV[2], IV[3] };
 	md5_compress(IHV, msg1block0);
 
+	g_block_ok = 0;
 	if (verbose)
 		cout << endl << "Generating second block: " << flush;
 	find_block1(msg1block1, IHV);
+	if (!g_block_ok || search_cancelled())
+		return false;
 
 	for (int t = 0; t < 16; ++t)
 	{
@@ -578,4 +603,5 @@ void find_collision(const uint32 IV[], uint32 msg1block0[], uint32 msg1block1[],
 	msg2block1[4] += 1 << 31; msg2block1[11] -= 1 << 15; msg2block1[14] += 1 << 31;
 	if (verbose)
 		cout << endl;
+	return true;
 }

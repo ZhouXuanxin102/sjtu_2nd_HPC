@@ -1,27 +1,197 @@
+#include <atomic>
 #include <iostream>
 #include <vector>
 #include "main.hpp"
 
-uint32 seed32_1, seed32_2;
+thread_local uint32 seed32_1, seed32_2;
+thread_local int g_block_ok;
+thread_local const std::atomic<int>* g_stop = 0;
+
+#define SSTEP(f, a, b, c, d, m, ac, rc) \
+	do { \
+		(a) += f((b), (c), (d)) + (m) + (ac); \
+		(a) = RL((a), (rc)) + (b); \
+	} while (0)
+
+// Scalar tail after the q26 bit-15 test. block[8,9,12] already match this q9.
+static inline bool block0_accept(uint32 a, uint32 b, uint32 c, uint32 d, uint32 block[16], const uint32 IV[])
+{
+	c = (c << 16 | c >> 16) + d;
+
+	MD5_STEP(HH, b, c, d, a, block[14], 0xfde5380c, 23);
+	MD5_STEP(HH, a, b, c, d, block[1], 0xa4beea44, 4);
+	MD5_STEP(HH, d, a, b, c, block[4], 0x4bdecfa9, 11);
+	MD5_STEP(HH, c, d, a, b, block[7], 0xf6bb4b60, 16);
+	MD5_STEP(HH, b, c, d, a, block[10], 0xbebfbc70, 23);
+	MD5_STEP(HH, a, b, c, d, block[13], 0x289b7ec6, 4);
+	MD5_STEP(HH, d, a, b, c, block[0], 0xeaa127fa, 11);
+	MD5_STEP(HH, c, d, a, b, block[3], 0xd4ef3085, 16);
+	MD5_STEP(HH, b, c, d, a, block[6], 0x04881d05, 23);
+	MD5_STEP(HH, a, b, c, d, block[9], 0xd9d4d039, 4);
+	MD5_STEP(HH, d, a, b, c, block[12], 0xe6db99e5, 11);
+	MD5_STEP(HH, c, d, a, b, block[15], 0x1fa27cf8, 16);
+	MD5_STEP(HH, b, c, d, a, block[2], 0xc4ac5665, 23);
+	if (0 != ((b ^ d) & 0x80000000))
+		return false;
+
+	MD5_STEP(II, a, b, c, d, block[0], 0xf4292244, 6);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, d, a, b, c, block[7], 0x432aff97, 10);
+	if (0 == ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, c, d, a, b, block[14], 0xab9423a7, 15);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, b, c, d, a, block[5], 0xfc93a039, 21);
+	if (0 != ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, a, b, c, d, block[12], 0x655b59c3, 6);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, d, a, b, c, block[3], 0x8f0ccc92, 10);
+	if (0 != ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, c, d, a, b, block[10], 0xffeff47d, 15);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, b, c, d, a, block[1], 0x85845dd1, 21);
+	if (0 != ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, a, b, c, d, block[8], 0x6fa87e4f, 6);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, d, a, b, c, block[15], 0xfe2ce6e0, 10);
+	if (0 != ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, c, d, a, b, block[6], 0xa3014314, 15);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, b, c, d, a, block[13], 0x4e0811a1, 21);
+	if (0 == ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, a, b, c, d, block[4], 0xf7537e82, 6);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, d, a, b, c, block[11], 0xbd3af235, 10);
+	if (0 != ((b ^ d) >> 31)) return false;
+	MD5_STEP(II, c, d, a, b, block[2], 0x2ad7d2bb, 15);
+	if (0 != ((a ^ c) >> 31)) return false;
+	MD5_STEP(II, b, c, d, a, block[9], 0xeb86d391, 21);
+
+	uint32 IHV1 = b + IV[1];
+	uint32 IHV2 = c + IV[2];
+	uint32 IHV3 = d + IV[3];
+
+	bool wang = true;
+	if (0x02000000 != ((IHV2 ^ IHV1) & 0x86000000)) wang = false;
+	if (0 != ((IHV1 ^ IHV3) & 0x82000000)) wang = false;
+	if (0 != (IHV1 & 0x06000020)) wang = false;
+
+	bool stevens = true;
+	if (((IHV1 ^ IHV2) >> 31) != 0 || ((IHV1 ^ IHV3) >> 31) != 0) stevens = false;
+	if ((IHV3 & (1 << 25)) != 0 || (IHV2 & (1 << 25)) != 0 || (IHV1 & (1 << 25)) != 0
+		|| ((IHV2 ^ IHV1) & 1) != 0) stevens = false;
+
+	if (!(wang || stevens)) return false;
+
+	uint32 IV1[4], IV2[4];
+	for (int t = 0; t < 4; ++t)
+		IV2[t] = IV1[t] = IV[t];
+
+	uint32 block2[16];
+	for (int t = 0; t < 16; ++t)
+		block2[t] = block[t];
+	block2[4] += 1 << 31;
+	block2[11] += 1 << 15;
+	block2[14] += 1 << 31;
+
+	md5_compress(IV1, block);
+	md5_compress(IV2, block2);
+	return (IV2[0] == IV1[0] + (1 << 31))
+		&& (IV2[1] == IV1[1] + (1 << 31) + (1 << 25))
+		&& (IV2[2] == IV1[2] + (1 << 31) + (1 << 25))
+		&& (IV2[3] == IV1[3] + (1 << 31) + (1 << 25));
+}
+
+static bool block0_tunnel(
+	const uint32* q9tab, uint32 q9base, uint32 q8s, uint32 q7s, uint32 q10,
+	uint32 b12base, uint32 tt8, uint32 tt9,
+	uint32 aa, uint32 bb, uint32 cc, uint32 dd,
+	uint32 m14s, uint32 m3s, uint32 m13s, uint32 m2s, uint32 m7s, uint32 m5s, uint32 m11s,
+	uint32 block[], const uint32 IV[])
+{
+	for (unsigned counter4 = 0; counter4 < (1u << 16); counter4 += 2)
+	{
+		if ((counter4 & 1023u) == 0 && search_cancelled()) return false;
+		uint32 q9_0 = q9base ^ q9tab[counter4];
+		uint32 q9_1 = q9base ^ q9tab[counter4 + 1];
+		uint32 b12_0 = b12base - q9_0;
+		uint32 b12_1 = b12base - q9_1;
+		uint32 b8_0 = RR(q9_0 - q8s, 7) - tt8;
+		uint32 b8_1 = RR(q9_1 - q8s, 7) - tt8;
+		uint32 b9_0 = RR(q10 - q9_0, 12) - FF(q9_0, q8s, q7s) - tt9;
+		uint32 b9_1 = RR(q10 - q9_1, 12) - FF(q9_1, q8s, q7s) - tt9;
+
+		uint32 a0 = aa, b0 = bb, c0 = cc, d0 = dd;
+		uint32 a1 = aa, b1 = bb, c1 = cc, d1 = dd;
+		SSTEP(GG, a0, b0, c0, d0, b9_0, 0x21e1cde6, 5);
+		SSTEP(GG, a1, b1, c1, d1, b9_1, 0x21e1cde6, 5);
+		SSTEP(GG, d0, a0, b0, c0, m14s, 0xc33707d6, 9);
+		SSTEP(GG, d1, a1, b1, c1, m14s, 0xc33707d6, 9);
+		SSTEP(GG, c0, d0, a0, b0, m3s, 0xf4d50d87, 14);
+		SSTEP(GG, c1, d1, a1, b1, m3s, 0xf4d50d87, 14);
+		SSTEP(GG, b0, c0, d0, a0, b8_0, 0x455a14ed, 20);
+		SSTEP(GG, b1, c1, d1, a1, b8_1, 0x455a14ed, 20);
+		SSTEP(GG, a0, b0, c0, d0, m13s, 0xa9e3e905, 5);
+		SSTEP(GG, a1, b1, c1, d1, m13s, 0xa9e3e905, 5);
+		SSTEP(GG, d0, a0, b0, c0, m2s, 0xfcefa3f8, 9);
+		SSTEP(GG, d1, a1, b1, c1, m2s, 0xfcefa3f8, 9);
+		SSTEP(GG, c0, d0, a0, b0, m7s, 0x676f02d9, 14);
+		SSTEP(GG, c1, d1, a1, b1, m7s, 0x676f02d9, 14);
+		SSTEP(GG, b0, c0, d0, a0, b12_0, 0x8d2a4c8a, 20);
+		SSTEP(GG, b1, c1, d1, a1, b12_1, 0x8d2a4c8a, 20);
+		SSTEP(HH, a0, b0, c0, d0, m5s, 0xfffa3942, 4);
+		SSTEP(HH, a1, b1, c1, d1, m5s, 0xfffa3942, 4);
+		SSTEP(HH, d0, a0, b0, c0, b8_0, 0x8771f681, 11);
+		SSTEP(HH, d1, a1, b1, c1, b8_1, 0x8771f681, 11);
+		c0 += HH(d0, a0, b0) + m11s;
+		c1 += HH(d1, a1, b1) + m11s;
+
+		if ((c0 & (1u << 15)) == 0) {
+			block[8] = b8_0;
+			block[9] = b9_0;
+			block[12] = b12_0;
+			if (block0_accept(a0, b0, c0, d0, block, IV))
+				return true;
+		}
+		if ((c1 & (1u << 15)) == 0) {
+			block[8] = b8_1;
+			block[9] = b9_1;
+			block[12] = b12_1;
+			if (block0_accept(a1, b1, c1, d1, block, IV))
+				return true;
+		}
+	}
+	return false;
+}
+
+struct Block0Masks {
+	uint32 q4[1 << 4];
+	uint32 q9q10[1 << 3];
+	uint32 q9[1 << 16];
+};
+
+static const Block0Masks& block0_masks()
+{
+	static const Block0Masks masks = []() {
+		Block0Masks m;
+		for (unsigned k = 0; k < (1u << 4); ++k)
+			m.q4[k] = ((k<<2) ^ (k<<26)) & 0x38000004;
+		for (unsigned k = 0; k < (1u << 3); ++k)
+			m.q9q10[k] = ((k<<13) ^ (k<<4)) & 0x2060;
+		for (unsigned k = 0; k < (1u << 16); ++k)
+			m.q9[k] = ((k<<1) ^ (k<<2) ^ (k<<5) ^ (k<<7) ^ (k<<8) ^ (k<<10) ^ (k<<11) ^ (k<<13)) & 0x0eb94f16;
+		return m;
+	}();
+	return masks;
+}
 
 void find_block0(uint32 block[], const uint32 IV[])
 {
 	uint32 Q[68] = { IV[0], IV[3], IV[2], IV[1] };
-
-	std::vector<uint32> q4mask(1<<4);
-	for (unsigned k = 0; k < q4mask.size(); ++k)
-		q4mask[k] = ((k<<2) ^ (k<<26)) & 0x38000004;
-
-	std::vector<uint32> q9q10mask(1<<3);
-	for (unsigned k = 0; k < q9q10mask.size(); ++k)
-		q9q10mask[k] = ((k<<13) ^ (k<<4)) & 0x2060;
-		
-	std::vector<uint32> q9mask(1<<16);
-	for (unsigned k = 0; k < q9mask.size(); ++k)
-		q9mask[k] = ((k<<1) ^ (k<<2) ^ (k<<5) ^ (k<<7) ^ (k<<8) ^ (k<<10) ^ (k<<11) ^ (k<<13)) & 0x0eb94f16;
+	const Block0Masks& qmask = block0_masks();
 
 	while (true)
 	{
+		if (search_cancelled()) return;
 		Q[Qoff + 1] = xrng64();
 		Q[Qoff + 3] = (xrng64() & 0xfe87bc3f) | 0x017841c0;
 		Q[Qoff + 4] = (xrng64() & 0x44000033) | 0x000002c0 | (Q[Qoff + 3] & 0x0287bc00);
@@ -102,7 +272,7 @@ void find_block0(uint32 block[], const uint32 IV[])
 		unsigned counter2 = 0;
 		while (counter2 < (1<<4))
 		{
-			Q[Qoff+4] = q4 ^ q4mask[counter2];
+			Q[Qoff+4] = q4 ^ qmask.q4[counter2];
 			++counter2;
 			MD5_REVERSE_STEP(5, 0x4787c62a, 12);
 			uint32 q21 = tt21 + block[5];
@@ -131,8 +301,8 @@ void find_block0(uint32 block[], const uint32 IV[])
 			// the possible changes of q9 that also do not change m10 are used below
 			for (unsigned counter3 = 0; counter3 < (1<<3);)
 			{
-				uint32 q10 = Q[Qoff+10] ^ (q9q10mask[counter3] & 0x60);
-				Q[Qoff + 9] = q9backup ^ (q9q10mask[counter3] & 0x2000);
+				uint32 q10 = Q[Qoff+10] ^ (qmask.q9q10[counter3] & 0x60);
+				Q[Qoff + 9] = q9backup ^ (qmask.q9q10[counter3] & 0x2000);
 				++counter3;
 				uint32 m10 = RR(Q[Qoff+11]-q10,17);
 				m10 -= FF(q10, Q[Qoff+9], Q[Qoff+8]) + tt10;
@@ -156,119 +326,22 @@ void find_block0(uint32 block[], const uint32 IV[])
 				// iterate over possible changes of q9
 				// while keeping intact conditions on q1-q24
 				// this changes m8, m9 and m12 (but not m10!)
-				for (unsigned counter4 = 0; counter4 < (1<<16); ++counter4)
-				{
-					uint32 q9 = Q[Qoff + 9] ^ q9mask[counter4];
-					block[12] = tt12 - FF(Q[Qoff + 12], Q[Qoff + 11], q10) - q9;
-					uint32 m8 = q9 - Q[Qoff + 8];
-					block[8] = RR(m8, 7) - tt8; 
-					uint32 m9 = q10 - q9;
-					block[9] = RR(m9, 12) - FF(q9, Q[Qoff + 8], Q[Qoff + 7]) - tt9; 
-
-					uint32 a = aa, b = bb, c = cc, d = dd;
-					MD5_STEP(GG, a, b, c, d, block[9], 0x21e1cde6, 5);
-					MD5_STEP(GG, d, a, b, c, block[14], 0xc33707d6, 9);
-					MD5_STEP(GG, c, d, a, b, block[3], 0xf4d50d87, 14);
-					MD5_STEP(GG, b, c, d, a, block[8], 0x455a14ed, 20);
-					MD5_STEP(GG, a, b, c, d, block[13], 0xa9e3e905, 5);
-					MD5_STEP(GG, d, a, b, c, block[2], 0xfcefa3f8, 9);
-					MD5_STEP(GG, c, d, a, b, block[7], 0x676f02d9, 14);
-					MD5_STEP(GG, b, c, d, a, block[12], 0x8d2a4c8a, 20);
-					MD5_STEP(HH, a, b, c, d, block[5], 0xfffa3942, 4);
-					MD5_STEP(HH, d, a, b, c, block[8], 0x8771f681, 11);
-
-					c += HH(d, a, b) + block[11] + 0x6d9d6122;
-					if (0 != (c & (1 << 15))) 
-						continue;
-					c = (c<<16 | c>>16) + d;
-					
-					MD5_STEP(HH, b, c, d, a, block[14], 0xfde5380c, 23);
-					MD5_STEP(HH, a, b, c, d, block[1], 0xa4beea44, 4);
-					MD5_STEP(HH, d, a, b, c, block[4], 0x4bdecfa9, 11);
-					MD5_STEP(HH, c, d, a, b, block[7], 0xf6bb4b60, 16);
-					MD5_STEP(HH, b, c, d, a, block[10], 0xbebfbc70, 23);
-					MD5_STEP(HH, a, b, c, d, block[13], 0x289b7ec6, 4);
-					MD5_STEP(HH, d, a, b, c, block[0], 0xeaa127fa, 11);
-					MD5_STEP(HH, c, d, a, b, block[3], 0xd4ef3085, 16);
-					MD5_STEP(HH, b, c, d, a, block[6], 0x04881d05, 23);
-					MD5_STEP(HH, a, b, c, d, block[9], 0xd9d4d039, 4);
-					MD5_STEP(HH, d, a, b, c, block[12], 0xe6db99e5, 11);
-					MD5_STEP(HH, c, d, a, b, block[15], 0x1fa27cf8, 16);
-					MD5_STEP(HH, b, c, d, a, block[2], 0xc4ac5665, 23);
-					if (0 != ((b^d) & 0x80000000))
-						continue;
-
-					MD5_STEP(II, a, b, c, d, block[0], 0xf4292244, 6);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, d, a, b, c, block[7], 0x432aff97, 10);
-					if (0 == ((b^d) >> 31)) continue;
-					MD5_STEP(II, c, d, a, b, block[14], 0xab9423a7, 15);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, b, c, d, a, block[5], 0xfc93a039, 21);
-					if (0 != ((b^d) >> 31)) continue;
-					MD5_STEP(II, a, b, c, d, block[12], 0x655b59c3, 6);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, d, a, b, c, block[3], 0x8f0ccc92, 10);
-					if (0 != ((b^d) >> 31)) continue;
-					MD5_STEP(II, c, d, a, b, block[10], 0xffeff47d, 15);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, b, c, d, a, block[1], 0x85845dd1, 21);
-					if (0 != ((b^d) >> 31)) continue;
-					MD5_STEP(II, a, b, c, d, block[8], 0x6fa87e4f, 6);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, d, a, b, c, block[15], 0xfe2ce6e0, 10);
-					if (0 != ((b^d) >> 31)) continue;
-					MD5_STEP(II, c, d, a, b, block[6], 0xa3014314, 15);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, b, c, d, a, block[13], 0x4e0811a1, 21);
-					if (0 == ((b^d) >> 31)) continue;
-					MD5_STEP(II, a, b, c, d, block[4], 0xf7537e82, 6);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, d, a, b, c, block[11], 0xbd3af235, 10);
-					if (0 != ((b^d) >> 31)) continue;
-					MD5_STEP(II, c, d, a, b, block[2], 0x2ad7d2bb, 15);
-					if (0 != ((a^c) >> 31)) continue;
-					MD5_STEP(II, b, c, d, a, block[9], 0xeb86d391, 21);
-
-					uint32 IHV1 = b + IV[1];
-					uint32 IHV2 = c + IV[2];
-					uint32 IHV3 = d + IV[3];
-
-					bool wang = true;
-					if (0x02000000 != ((IHV2^IHV1) & 0x86000000)) wang = false;
-					if (0 != ((IHV1^IHV3) & 0x82000000)) wang = false;
-					if (0 != (IHV1 & 0x06000020)) wang = false;
-					
-					bool stevens = true;
-					if ( ((IHV1^IHV2)>>31)!=0 || ((IHV1^IHV3)>>31)!= 0 ) stevens = false;
-					if ( (IHV3&(1<<25))!=0 || (IHV2&(1<<25))!=0 || (IHV1&(1<<25))!=0 
-						|| ((IHV2^IHV1)&1)!=0) stevens = false;
-										
-					if (!(wang || stevens)) continue;
-
-					std::cout << "." << std::flush;
-
-					uint32 IV1[4], IV2[4];
-					for (int t = 0; t < 4; ++t)
-						IV2[t] = IV1[t] = IV[t];
-
-					uint32 block2[16];
-					for (int t = 0; t < 16; ++t)
-						block2[t] = block[t];
-					block2[4] += 1<<31;
-					block2[11] += 1<<15;
-					block2[14] += 1<<31;
-
-					md5_compress(IV1, block);
-					md5_compress(IV2, block2);
-						if (	   (IV2[0] == IV1[0] + (1<<31))
-								&& (IV2[1] == IV1[1] + (1<<31) + (1<<25))
-								&& (IV2[2] == IV1[2] + (1<<31) + (1<<25))
-								&& (IV2[3] == IV1[3] + (1<<31) + (1<<25)))
-							return;
-
-					if (IV2[0] != IV1[0] + (1<<31))
-						std::cout << "!" << std::flush;
+				const uint32 ff121110 = FF(Q[Qoff + 12], Q[Qoff + 11], q10);
+				const uint32 q9base = Q[Qoff + 9];
+				const uint32 q8s = Q[Qoff + 8];
+				const uint32 q7s = Q[Qoff + 7];
+				const uint32 b12base = tt12 - ff121110;
+				const uint32 m14s = block[14];
+				const uint32 m3s = block[3];
+				const uint32 m13s = block[13];
+				const uint32 m2s = block[2];
+				const uint32 m7s = block[7];
+				const uint32 m5s = block[5];
+				const uint32 m11s = block[11] + 0x6d9d6122u;
+				if (block0_tunnel(qmask.q9, q9base, q8s, q7s, q10, b12base, tt8, tt9,
+						aa, bb, cc, dd, m14s, m3s, m13s, m2s, m7s, m5s, m11s, block, IV)) {
+					g_block_ok = 1;
+					return;
 				}
 			}
 		}

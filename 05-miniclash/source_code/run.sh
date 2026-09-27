@@ -20,30 +20,34 @@ if [ ! -x "$BIN" ]; then
 	exit 1
 fi
 
-status=0
-n=0
-
-# Fields are space-separated: <input_file> <output_file1> <output_file2>.
-while read -r infile out1 out2 rest; do
-	# Skip blank lines.
-	[ -n "${infile:-}" ] || continue
-
-	if [ -z "${out2:-}" ] || [ -n "${rest:-}" ]; then
-		echo "$0: malformed line: $infile ${out1:-} ${out2:-} ${rest:-}" >&2
-		status=1
-		continue
+if [ -n "${MINICLASH_WORKERS:-}" ]; then
+	workers=$MINICLASH_WORKERS
+else
+	allowed=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)
+	workers=0
+	IFS=',' read -ra parts <<< "${allowed:-}"
+	for part in "${parts[@]}"; do
+		[ -n "$part" ] || continue
+		case "$part" in
+			*-*)
+				lo=${part%-*}
+				hi=${part#*-}
+				workers=$((workers + hi - lo + 1))
+				;;
+			*)
+				workers=$((workers + 1))
+				;;
+		esac
+	done
+	if [ "$workers" -lt 1 ]; then
+		workers=$(nproc 2>/dev/null || echo 1)
 	fi
+fi
+if [ "$workers" -gt 32 ]; then
+	workers=32
+fi
+if [ "$workers" -lt 1 ]; then
+	workers=1
+fi
 
-	# -q quiets the per-collision banner, -p sets the prefix file (which is also
-	# copied into both outputs), -o names the two outputs and must come last.
-	if ! "$BIN" -q -p "$infile" -o "$out1" "$out2" >/dev/null; then
-		echo "$0: failed on $infile" >&2
-		status=1
-		continue
-	fi
-
-	n=$((n + 1))
-done < "$TASKS"
-
-echo "$0: generated $n collisions"
-exit "$status"
+exec "$BIN" --threads "$workers" --tasks "$TASKS"
